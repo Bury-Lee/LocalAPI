@@ -144,7 +144,7 @@ pub async fn control(State(st): State<Arc<AppState>>) -> Html<String> {
     }
     Html(format!(
         r#"<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>dsh-web-gateway</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>LocalAPI</title>
 <style>
 body{{font:14px/1.6 system-ui,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 16px;color:#222}}
 h1{{font-size:20px}}code{{background:#f4f4f4;padding:1px 5px;border-radius:4px}}
