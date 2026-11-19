@@ -151,7 +151,7 @@ h1{{font-size:20px}}code{{background:#f4f4f4;padding:1px 5px;border-radius:4px}}
 table{{border-collapse:collapse;width:100%}}td{{border-bottom:1px solid #eee;padding:6px 4px;vertical-align:top}}
 a{{color:#0b57d0;text-decoration:none}}a:hover{{text-decoration:underline}}
 </style></head><body>
-<h1>dsh-web-gateway 控制台</h1>
+<h1>欢迎使用 LocalAPI</h1>
 <table>
 <tr><td>站点</td><td><code>{site}</code></td></tr>
 <tr><td>监听</td><td><code>{host}</code>（{headless}）</td></tr>

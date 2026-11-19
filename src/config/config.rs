@@ -169,7 +169,7 @@ impl Default for Config {
             Driver: "cjs/deepseek-driver.cjs".into(),
             Site: "".into(),
             Base: ".data".into(),
-            Headless: false,
+            Headless: true,
             TimeoutSecs: 240,
             LoginWaitSecs: 300,
             MaxConcurrent: 1,
