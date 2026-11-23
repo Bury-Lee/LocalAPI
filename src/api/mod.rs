@@ -1,3 +1,10 @@
-pub mod handle;
+pub mod chat;
+pub mod errors;
+pub mod health;
+pub mod history;
+pub mod login;
+pub mod middleware;
+pub mod models;
+pub mod pages;
 pub mod router;
 pub mod tools;

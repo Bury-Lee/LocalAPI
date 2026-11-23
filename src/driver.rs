@@ -6,7 +6,6 @@
 //! - 事件：`{"event":"stream-end","streamId":"s1",...}`（无 id，异步推送）
 //!
 //! 底层是推送模型，上层想要 `Future`，所以用三张表
-//! 把事件折叠成 await 点。读取集中在一个任务里。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

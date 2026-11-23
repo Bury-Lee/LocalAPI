@@ -3,10 +3,11 @@ pub mod app_status;
 pub mod config;
 pub mod driver;
 pub mod flag;
+pub mod model;
 pub mod openai;
 
-// CLI 解析与子命令都在 flag 模块，main 只做入口转发
+/// CLI 解析与子命令都放在 flag 模块
 #[tokio::main]
 async fn main() {
-    flag::Dispatch().await;
+    flag::Dispatch().await;//调用命令行主程序
 }

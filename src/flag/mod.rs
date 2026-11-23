@@ -26,9 +26,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::api::router::BuildRouter;
 use crate::app_status::AppState;
-use crate::config::config::{
-    self, Config, DefaultConfigPath, LoadDefaultConfig, ProjectDir, ResolvePath, UserConfigPath,
-};
+use crate::config::config::{self, Config, DefaultConfigPath};
 
 /// 无子命令时默认按 `run` 处理，保持旧版直接双击启动的行为。
 #[derive(Debug, Parser)]
@@ -104,18 +102,37 @@ fn fail(err: &str) -> ! {
 
 /// `run`：原有的启动流程。
 async fn runGateway() {
-    // 配置查找：DSWEB_CONFIG → ./config.json → 全局；相对路径一律按“启动目录”解析
-    let (cfg, configPath) = LoadDefaultConfig();
+    let configPath = std::env::current_dir()
+        .map(|dir| dir.join(DefaultConfigPath))
+        .unwrap_or_else(|_| PathBuf::from(DefaultConfigPath));
+    let (cfg, firstRun) = if configPath.is_file() {
+        match Config::ReadFromJson(&configPath.to_string_lossy()) {
+            Ok(cfg) => (cfg, false),
+            Err(err) => fail(&err),
+        }
+    } else {
+        // 第一次使用：内置默认配置作为模板，先落盘保存，再据此启动引导页面
+        let cfg = Config::default();
+        if let Err(err) = saveConfig(&configPath, &cfg) {
+            fail(&err);
+        }
+        println!("首次运行：已生成默认配置 {}", configPath.display());
+        (cfg, true)
+    };
+    if let Err(err) = config::InitConfig(cfg) {
+        fail(&err);
+    }
+    //上一个cfg用于初始化,这里再拿一个引用
+    let cfg = config::GetConfig();
 
-    // 日志初始化失败不阻断网关：stderr/控制台还能用，先让服务起来
+    // 日志初始化失败不阻断网关,使用stderr控制台
     if let Err(err) = Config::InitLog() {
         eprintln!("{err}");
     }
 
     tracing::info!(
         config = %configPath.display(),
-        cwd = %config::LaunchDir().display(),
-        project = %config::ProjectDir().display(),
+        cwd = %configPath.parent().unwrap_or(Path::new(".")).display(),
         "config loaded"
     );
 
@@ -128,7 +145,9 @@ async fn runGateway() {
     let app = BuildRouter(state.clone());
     let addr = cfg.HostAndPortOrPanic();
 
-    println!("请访问: http://{}/control 开始", cfg.Host);
+    let host = cfg.Host.clone();
+    let control_url = format!("http://{host}/control");
+    println!("请访问: {control_url} 开始");
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -138,11 +157,21 @@ async fn runGateway() {
         }
     };
 
+    // 首次运行：监听已经就绪，打开新手引导页（与控制台 `/control` 不同）
+    if firstRun {
+        let guide_url = format!("http://{host}/guide");
+        if let Err(err) = open::that(&guide_url) {
+            eprintln!("无法自动打开浏览器，请手动访问 {guide_url}: {err}");
+        }
+    }
+    if let Err(err) = open::that(&control_url) {
+        eprintln!("无法自动打开浏览器，请手动访问 {control_url}: {err}");
+    }
     tracing::info!(
         %addr,
         site = %cfg.SiteName(),
-        driver = %config::ResolvePath(&cfg.Driver).display(),
-        base = %config::ResolvePath(&cfg.Base).display(),
+        driver = %cfg.DriverPath().display(),
+        base = %cfg.BasePath().display(),
         headless = cfg.Headless,
         timeout_secs = cfg.TimeoutSecs,
         max_concurrent = cfg.MaxConcurrent,
@@ -166,31 +195,32 @@ fn initCmd(args: InitArgs) -> Result<(), String> {
     let path = initTarget(&args)?;
     // 配置里可能有用户手调的代理/路径，默认不覆盖，--force 才视为明确同意
     if path.exists() && !args.force {
-        return Err(format!(
-            "{} 已存在；如需覆盖请加 --force",
-            path.display()
-        ));
-    }
-
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
+        return Err(format!("{} 已存在；如需覆盖请加 --force", path.display()));
     }
 
     // 模板跟着默认配置走：新增字段不会漏，也不会出现手抄导致的漂移
-    let text =
-        serde_json::to_string_pretty(&Config::default()).map_err(|e| format!("序列化默认配置失败: {e}"))?;
-    std::fs::write(&path, format!("{text}\n"))
-        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    saveConfig(&path, &Config::default())?;
 
     println!("已初始化配置: {}", path.display());
     Ok(())
 }
 
-/// 目标优先级：`--path` > `--global` > `DSWEB_CONFIG` > 项目根；与运行时查找配置的顺序对齐。
+/// 把配置按模板格式（缩进 JSON）写入指定路径。
+fn saveConfig(path: &Path, cfg: &Config) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {e}"))?;
+    std::fs::write(path, format!("{text}\n"))
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    Ok(())
+}
+
+/// 初始化指定路径。
 fn initTarget(args: &InitArgs) -> Result<PathBuf, String> {
     if let Some(path) = &args.path {
-        // 显式路径跟随当前目录；只有配置里的相对路径才锚定项目根
+        // 显式路径跟随当前目录
         return if path.is_absolute() {
             Ok(path.to_path_buf())
         } else {
@@ -200,28 +230,37 @@ fn initTarget(args: &InitArgs) -> Result<PathBuf, String> {
         };
     }
     if args.global {
-        return Ok(UserConfigPath());
+        // 全局配置：%APPDATA%\<AppDirName>\config.json，取不到则退回当前目录
+        let base = std::env::var("APPDATA")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        return Ok(base.join(config::AppDirName).join(DefaultConfigPath));
     }
-    if let Some(path) = std::env::var("DSWEB_CONFIG")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    {
-        return Ok(ResolvePath(&path));
-    }
-    Ok(ProjectDir().join(DefaultConfigPath))
+    Ok(std::env::current_dir()
+        .map_err(|e| format!("获取当前目录失败: {e}"))?
+        .join(DefaultConfigPath))
 }
 
 /// `clean`：删除运行时数据目录；`--logs` 时连日志目录一起删。
 fn cleanCmd(args: CleanArgs) -> Result<(), String> {
-    // 清理必须对准运行时真正使用的目录：环境变量或外部配置可能已经改过位置
-    let (cfg, _) = LoadDefaultConfig();
-    let project = ProjectDir();
+    // 清理必须对准运行时真正使用的目录：配置只从当前目录的 config.json 读取
+    let configPath = std::env::current_dir()
+        .map(|dir| dir.join(DefaultConfigPath))
+        .unwrap_or_else(|_| PathBuf::from(DefaultConfigPath));
+    let cfg = if configPath.is_file() {
+        Config::ReadFromJson(&configPath.to_string_lossy())?
+    } else {
+        Config::default()
+    };
+    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Base 里是 profile/Cookie/校准；日志默认保留，排查问题时还有据可查
     let mut targets = vec![cfg.BasePath()];
     if args.logs {
-        targets.push(ResolvePath(&cfg.LogDir));
+        targets.push(PathBuf::from(&cfg.LogDir));
     }
 
     for target in targets {

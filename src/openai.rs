@@ -1,10 +1,10 @@
 //! 纯转换层：OpenAI 数据结构 <-> driver 需要的文本/JSON。
 //! 这里没有任何 I/O 或共享状态，可以单独读写、单独测试。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-// serde 默认会忽略未知字段，所以 temperature / max_tokens 等不用声明。
+// serde 默认会忽略未知字段，所以 temperature和max_tokens 等不用声明。
 // #[serde(default)] = 请求里缺这个字段时用 Default::default()，避免反序列化失败。
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
@@ -16,10 +16,11 @@ pub struct ChatRequest {
     pub stream: bool,
 }
 
-// content 在 OpenAI 协议里可能是字符串，也可能是 [{type:"text",text:"..."}] 数组，
-// 所以先收成 Value，交给 content_text() 再归一化。
-#[derive(Debug, Deserialize)]
+// content 在 OpenAI 协议里可能是字符串，也可能是 [{type:"text",text:"..."}] 数组,所以先解析为Value值，之后由过滤并归一化。
+// 同时实现 Serialize，便于原样写进会话历史。
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Message {
+
     pub role: String,
     #[serde(default)]
     pub content: Option<Value>,
@@ -50,7 +51,9 @@ fn content_text(content: &Option<Value>) -> String {
             .filter_map(|p| {
                 let kind = p.get("type").and_then(|v| v.as_str());
                 if kind == Some("text") {
-                    p.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    p.get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -113,6 +116,7 @@ pub fn build_tools_text(tools: &[Value]) -> String {
         String::new(),
         "可用工具：".to_string(),
     ];
+    //TODO:改为使用yaml,看看能不能避免工具判定被封号
     for tool in tools {
         let f = tool.get("function").unwrap_or(tool);
         let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -127,7 +131,6 @@ pub fn build_tools_text(tools: &[Value]) -> String {
     }
     lines.join("\n")
 }
-
 
 /// 从模型回复中提取 ```TYC 代码块并解析其中的 YAML
 pub fn parse_tool_call_yaml(text: &str) -> Option<Value> {
@@ -174,7 +177,7 @@ pub fn split_chars(text: &str, size: usize) -> Vec<String> {
         .collect()
 }
 
-// driver 的 `models` RPC 不可用时的兜底列表（按站点）。
+// driver 的 `models` RPC 不可用时的列表（按站点）。
 pub fn fallback_models(site: &str, created: u64) -> Vec<Value> {
     let list: &[(&str, &str)] = match site {
         "qwen" => &[
@@ -192,6 +195,10 @@ pub fn fallback_models(site: &str, created: u64) -> Vec<Value> {
             ("gpt-5-4-thinking", "GPT-5.4 Thinking"),
             ("gpt-5-3-mini", "GPT-5.3 Mini"),
             ("gpt-5-mini", "GPT-5 mini"),
+        ],
+        "deepseek" => &[
+            ("deepseek-chat", "DeepSeek 快速"),
+            ("deepseek-reasoner", "DeepSeek 专家"),
         ],
         _ => &[
             ("deepseek-chat", "DeepSeek 快速"),

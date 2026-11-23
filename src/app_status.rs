@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::config::config::{Config, GetConfig, ResolvePath};
+use crate::config::config::{Config, GetConfig};
 use crate::driver::DriverManager;
+use crate::model::history::History;
 
 // 请求 id 通过 request extensions 在中间件与 handler 之间传递；
 // Extension<T> 提取器取的就是 req.extensions() 里的值，所以 T 需要 Clone。
@@ -21,6 +22,8 @@ pub struct AppState {
     managers: Mutex<HashMap<String, Arc<DriverManager>>>,
     // 限制同时占用浏览器的请求数（网页端只适合串行）
     pub sem: Arc<Semaphore>,
+    // 会话历史：每个 api 调用一条，便于导出聊天记录
+    pub history: Mutex<History>,
     // 配置是全局 OnceLock 里的静态引用
     pub cfg: &'static Config,
 }
@@ -30,14 +33,20 @@ impl AppState {
         let cfg = GetConfig();
         // 相对路径按启动目录补全：driver 脚本与 `.data`
         let manager = DriverManager::new(
-            ResolvePath(&cfg.Driver),
-            ResolvePath(&cfg.Base),
+            PathBuf::from(&cfg.Driver),
+            PathBuf::from(&cfg.Base),
             cfg.DriverEnv(),
         );
+        // 历史文件坏了不影响网关，提示后从空历史开始
+        let mut history = History::default();
+        if let Err(err) = history.Load() {
+            eprintln!("{err}");
+        }
         Arc::new(AppState {
             manager,
             managers: Mutex::new(HashMap::new()),
             sem: Arc::new(Semaphore::new(cfg.MaxConcurrent.max(1))),
+            history: Mutex::new(history),
             cfg,
         })
     }
@@ -59,7 +68,7 @@ impl AppState {
         }
 
         let driver_path =
-            driver.unwrap_or_else(|| ResolvePath(&format!("cjs/{site}-driver.cjs")));
+            driver.unwrap_or_else(|| PathBuf::from(format!("cjs/{site}-driver.cjs")));
         if !driver_path.is_file() {
             return Err(format!(
                 "厂商 {} 的驱动脚本不存在: {}（需要 cjs/{}-driver.cjs）",
@@ -76,10 +85,11 @@ impl AppState {
         }
         // 登录必须是有头浏览器；同一个 base 下各厂商的 profile 目录互不冲突：
         // deepseek 用 profiles/default，多站点驱动用 profiles/<site>-<profile>。
+        //TODO:解决一下历史遗留问题,这里应该使用统一的env
         let mut envs = self.cfg.DriverEnv();
         set_env(&mut envs, "DS_WEB_SITE", &site);
         set_env(&mut envs, "DSWEB_HEADLESS", "0");
-        let manager = DriverManager::new(driver_path, ResolvePath(&self.cfg.Base), envs);
+        let manager = DriverManager::new(driver_path, PathBuf::from(&self.cfg.Base), envs);
         managers.insert(key, manager.clone());
         Ok(manager)
     }

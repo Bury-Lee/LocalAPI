@@ -4,7 +4,7 @@ use std::fs::{create_dir_all, read_to_string, OpenOptions};
 use std::io;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -13,119 +13,9 @@ pub const DefaultConfigPath: &str = "config.json";
 /// 全局配置目录名：`%APPDATA%\dsh-web-gateway\config.json`
 pub const AppDirName: &str = "dsh-web-gateway";
 
-/// 启动目录：所有相对路径的基准（从哪个目录启动，就以哪个目录为准）。
-pub fn LaunchDir() -> PathBuf {
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
 
-/// 项目根目录：相对路径（cjs/、.data、logs、config.json）真正的基准。
-///
-/// 优先当前目录；否则从当前目录和可执行文件所在目录逐级向上找带 `cjs/` 或
-/// `Cargo.toml` 的目录。这样从 `target\debug` 里直接启动 exe 也能找到项目根目录，
-/// 不会生成 `target\debug\.data` 或找不到 `cjs/*-driver.cjs`。
-pub fn ProjectDir() -> PathBuf {
-    let cwd = LaunchDir();
-    if let Some(root) = find_project_root(&cwd) {
-        return root;
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(root) = find_project_root(dir) {
-                return root;
-            }
-        }
-    }
-    cwd
-}
 
-fn is_project_root(dir: &Path) -> bool {
-    dir.join("cjs").is_dir() || dir.join("Cargo.toml").is_file()
-}
 
-fn find_project_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .take(8)
-        .find(|dir| is_project_root(dir))
-        .map(Path::to_path_buf)
-}
-
-/// 展开 `~`（用户目录）和 `%VAR%`/`$VAR`；其余原样。
-pub fn ExpandPath(value: &str) -> PathBuf {
-    let mut s = value.trim().to_string();
-    if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
-        let home = EnvStr(&["USERPROFILE", "HOME"]).unwrap_or_default();
-        s = if s.len() > 1 { format!("{home}{}", &s[1..]) } else { home };
-    }
-    // %NAME% 形式
-    while let Some(start) = s.find('%') {
-        let Some(rel) = s[start + 1..].find('%') else { break };
-        let end = start + 1 + rel;
-        let name = &s[start + 1..end];
-        match env::var(name) {
-            Ok(v) => s.replace_range(start..=end, &v),
-            Err(_) => break,
-        }
-    }
-    // $NAME / ${NAME} 形式
-    if s.starts_with('$') {
-        let (name, rest) = if let Some(stripped) = s.strip_prefix("${") {
-            match stripped.find('}') {
-                Some(i) => (&stripped[..i], &stripped[i + 1..]),
-                None => (&stripped[..], ""),
-            }
-        } else {
-            let body = &s[1..];
-            let cut = body.find(['/', '\\']).unwrap_or(body.len());
-            (&body[..cut], &body[cut..])
-        };
-        if let Ok(v) = env::var(name) {
-            s = format!("{v}{rest}");
-        }
-    }
-    PathBuf::from(s)
-}
-
-/// 按项目根目录解析路径：绝对路径原样，`~`/环境变量展开，相对路径 join 项目根目录。
-pub fn ResolvePath(value: &str) -> PathBuf {
-    let expanded = ExpandPath(value);
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        ProjectDir().join(expanded)
-    }
-}
-
-/// 全局配置路径（Windows 用 `%APPDATA%`，其他平台用 `$HOME/.config`）。
-pub fn UserConfigPath() -> PathBuf {
-    if let Some(appdata) = EnvStr(&["APPDATA"]) {
-        return PathBuf::from(appdata).join(AppDirName).join(DefaultConfigPath);
-    }
-    if let Some(home) = EnvStr(&["HOME", "USERPROFILE"]) {
-        return PathBuf::from(home)
-            .join(".config")
-            .join(AppDirName)
-            .join(DefaultConfigPath);
-    }
-    ProjectDir().join(DefaultConfigPath)
-}
-
-/// 配置文件查找顺序：`DSWEB_CONFIG` → 项目根目录 `./config.json` → 全局配置。
-/// 都没命中时返回项目根目录路径（Load 会回落到默认值）。
-pub fn ResolveConfigPath() -> PathBuf {
-    if let Some(path) = EnvStr(&["DSWEB_CONFIG"]) {
-        return ResolvePath(&path);
-    }
-    let local = ProjectDir().join(DefaultConfigPath);
-    if local.is_file() {
-        return local;
-    }
-    let user = UserConfigPath();
-    if user.is_file() {
-        return user;
-    }
-    local
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -156,7 +46,7 @@ pub struct Config {
     pub Proxy: String,
     /// 是否忽略请求里的 tools,避免网页端输出 tool_call 格式
     pub IgnoreTools: bool,
-    ///速率控制.为null时自动
+    ///速率控制.为null时自动(预备字段)
     pub SpeedControl:Option<u8>
 }
 
@@ -195,57 +85,7 @@ impl Config {
     /// 环境变量优先级最高,方便临时切换驱动/站点而不改文件。
     pub fn Load(path: &str) -> Config {
         let mut cfg = Config::ReadFromJson(path).unwrap_or_default();
-        cfg.ApplyEnv();
         cfg
-    }
-
-    /// 环境变量覆盖,兼容旧版网关与驱动的变量名。
-    pub fn ApplyEnv(&mut self) {
-        if let Some(v) = EnvStr(&["DSWEB_ADDR", "DSWEB_HOST"]) {
-            self.Host = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_LOG_LEVEL", "RUST_LOG"]) {
-            self.LogLeastLevel = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_LOG_DIR"]) {
-            self.LogDir = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_DRIVER"]) {
-            self.Driver = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_SITE", "DS_WEB_SITE"]) {
-            self.Site = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_BASE", "DS_WEB_BASE"]) {
-            self.Base = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_HEADLESS"]) {
-            self.Headless = ParseBool(&v).unwrap_or(self.Headless);
-        }
-        if let Some(v) = EnvStr(&["DSWEB_TIMEOUT_SECS"]) {
-            if let Ok(n) = v.trim().parse() {
-                self.TimeoutSecs = n;
-            }
-        }
-        if let Some(v) = EnvStr(&["DSWEB_LOGIN_WAIT_SECS"]) {
-            if let Ok(n) = v.trim().parse() {
-                self.LoginWaitSecs = n;
-            }
-        }
-        if let Some(v) = EnvStr(&["DSWEB_MAX_CONCURRENT"]) {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                self.MaxConcurrent = n.max(1);
-            }
-        }
-        if let Some(v) = EnvStr(&["DSWEB_CHROME", "DS_WEB_CHROME"]) {
-            self.ChromePath = Some(v);
-        }
-        if let Some(v) = EnvStr(&["DSWEB_PROXY", "DS_WEB_PROXY"]) {
-            self.Proxy = v;
-        }
-        if let Some(v) = EnvStr(&["DSWEB_IGNORE_TOOLS"]) {
-            self.IgnoreTools = ParseBool(&v).unwrap_or(self.IgnoreTools);
-        }
     }
 
     /// 启动前做一次静态校验:地址可解析、驱动脚本存在。
@@ -275,9 +115,9 @@ impl Config {
             .unwrap_or_else(|e| panic!("配置的 Host {:?} 无法解析为 SocketAddr: {e}", self.Host))
     }
 
-    /// 驱动脚本路径（相对项目根目录）。
+    /// 驱动脚本路径（相对当前目录）。
     pub fn DriverPath(&self) -> PathBuf {
-        ResolvePath(&self.Driver)
+        PathBuf::from(&self.Driver)
     }
 
     /// 站点标识：显式配置优先，否则从驱动文件名推断（qwen-driver.cjs -> qwen）。
@@ -302,7 +142,7 @@ impl Config {
 
     /// 运行时数据目录。
     pub fn BasePath(&self) -> PathBuf {
-        ResolvePath(&self.Base)
+        PathBuf::from(&self.Base)
     }
 
     /// 浏览器 profile 目录:<base>/profiles/<site>-<profile>
@@ -348,7 +188,7 @@ impl Config {
 
         let cfg = GetConfig();
         let raw = if cfg.LogDir.trim().is_empty() { "logs" } else { cfg.LogDir.trim() };
-        let dir = ResolvePath(raw);
+        let dir = PathBuf::from(raw);
         create_dir_all(&dir).map_err(|e| format!("创建日志目录 {} 失败: {e}", dir.display()))?;
 
         let path = dir.join(format!("{}.log", Local::now().format("%Y-%m-%d")));
@@ -376,26 +216,6 @@ impl Config {
     }
 }
 
-/// 按顺序取第一个非空环境变量。
-fn EnvStr(names: &[&str]) -> Option<String> {
-    for name in names {
-        if let Ok(v) = env::var(name) {
-            let v = v.trim().to_string();
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
-fn ParseBool(v: &str) -> Option<bool> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
 
 static GlobalConfig: OnceLock<Config> = OnceLock::new();
 
@@ -425,23 +245,7 @@ pub fn LoadConfig(path: &str) -> &'static Config {
     GetConfig()
 }
 
-/// 按查找顺序（DSWEB_CONFIG → ./config.json → 全局）加载配置，
-/// 同时返回实际使用的配置文件路径，便于启动日志确认。
-pub fn LoadDefaultConfig() -> (&'static Config, PathBuf) {
-    let path = ResolveConfigPath();
-    let mut cfg = if path.is_file() {
-        match Config::ReadFromJson(&path.to_string_lossy()) {
-            Ok(cfg) => cfg,
-            Err(err) => {
-                // 日志还没初始化，只能走 stderr；启动日志里会再打印实际用的文件
-                eprintln!("{err}；改用默认配置");
-                Config::default()
-            }
-        }
-    } else {
-        Config::default()
-    };
-    cfg.ApplyEnv();
-    let _ = GlobalConfig.set(cfg);
-    (GetConfig(), path)
+///保存配置
+pub fn SaveConfig() {
+    print!("TODO:保存配置")
 }
