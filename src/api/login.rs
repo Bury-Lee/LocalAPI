@@ -18,7 +18,8 @@ use crate::app_status::AppState;
 /// - `site` / `vendor`：deepseek / qwen / doubao / gpt，默认取当前配置的站点
 /// - `profile`：浏览器 profile 名，默认 `default`
 /// - `wait`：本次等待登录的秒数，默认 `LoginWaitSecs`
-/// - `driver`：自定义驱动脚本路径（相对启动目录），默认 `cjs/<site>-driver.cjs`
+///
+/// 驱动路径固定为 `<root>/cjs/<site>-driver.cjs`，不接受自定义路径。
 pub async fn login(State(st): State<Arc<AppState>>, Query(q): Query<LoginParams>) -> Response {
     let site = q
         .site
@@ -31,13 +32,7 @@ pub async fn login(State(st): State<Arc<AppState>>, Query(q): Query<LoginParams>
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "default".to_string());
-    let driver = q
-        .driver
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
-    let manager = match st.manager_for_site(&site, driver).await {
+    let manager = match st.manager_for_site(&site).await {
         Ok(m) => m,
         Err(e) => return client_error(&e),
     };
@@ -49,15 +44,17 @@ pub async fn login(State(st): State<Arc<AppState>>, Query(q): Query<LoginParams>
         .wait
         .filter(|s| *s > 0)
         .map(Duration::from_secs)
-        .unwrap_or_else(|| st.cfg.LoginWait());
+        .unwrap_or_else(|| Duration::from_secs(st.cfg.LoginWaitSecs.max(1)));
     let params = json!({
         "profile": profile,
         "headless": false,
         "timeoutMs": wait.as_millis() as u64
     });
     info!(%site, %profile, wait_secs = wait.as_secs(), "login requested");
+    // 驱动内部可能先启动浏览器并等页面加载（最长 30s），再进入人工登录等待；
+    // 这里多留余量，否则登录还没开始网关就先超时返回 502。
     match driver
-        .rpc("login", params, wait + Duration::from_secs(30))
+        .rpc("login", params, wait + Duration::from_secs(90))
         .await
     {
         Ok(mut v) => {
@@ -78,5 +75,4 @@ pub struct LoginParams {
     pub vendor: Option<String>,
     pub profile: Option<String>,
     pub wait: Option<u64>,
-    pub driver: Option<String>,
 }

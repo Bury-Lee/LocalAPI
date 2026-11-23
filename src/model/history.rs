@@ -12,9 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 默认历史目录，每个会话保存为 `<id>.json`。
-pub const DefaultHistoryPath: &str = "history";
-
 /// 一次会话：api 调用 ID + 该次调用的消息列表。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -97,12 +94,6 @@ impl Session {
 pub struct History {
     path: PathBuf,
     map: BTreeMap<u64, Session>,
-}
-
-impl Default for History {
-    fn default() -> Self {
-        History::WithPath(DefaultHistoryPath)
-    }
 }
 
 impl History {
@@ -401,7 +392,7 @@ mod tests {
 
     #[test]
     fn append_creates_session_and_exports() {
-        let mut history = History::WithPath(DefaultHistoryPath);
+        let mut history = History::WithPath(temp_path("append"));
         history
             .Append(7, json!({"role": "user", "content": "记录我"}))
             .unwrap();
@@ -413,7 +404,7 @@ mod tests {
 
     #[test]
     fn new_session_rejects_duplicate() {
-        let mut history = History::WithPath(DefaultHistoryPath);
+        let mut history = History::WithPath(temp_path("duplicate"));
         history.NewSession(2).unwrap();
         assert!(history.NewSession(2).is_err());
     }

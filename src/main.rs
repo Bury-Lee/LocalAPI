@@ -1,4 +1,5 @@
 mod api;
+pub mod app_root;
 pub mod app_status;
 pub mod config;
 pub mod driver;

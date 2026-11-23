@@ -196,10 +196,6 @@ pub fn fallback_models(site: &str, created: u64) -> Vec<Value> {
             ("gpt-5-3-mini", "GPT-5.3 Mini"),
             ("gpt-5-mini", "GPT-5 mini"),
         ],
-        "deepseek" => &[
-            ("deepseek-chat", "DeepSeek 快速"),
-            ("deepseek-reasoner", "DeepSeek 专家"),
-        ],
         _ => &[
             ("deepseek-chat", "DeepSeek 快速"),
             ("deepseek-reasoner", "DeepSeek 专家"),

@@ -35,7 +35,7 @@ release: dist
 	if not exist "$(STAGE)" mkdir "$(STAGE)"
 	copy /Y "$(DIST)\$(BIN)" "$(STAGE)\$(BIN)"
 	xcopy /E /I /Y "$(DIST)\cjs" "$(STAGE)\cjs"
-	"$(DIST)\$(BIN)" init --path "$(STAGE)\config.json" --force
+	"$(STAGE)\$(BIN)" init
 	@if exist "README.md" copy /Y "README.md" "$(STAGE)\README.md"
 	@if exist "$(ARCHIVE)" del /Q "$(ARCHIVE)"
 	cd /D "$(PKG)" && $(SEVENZIP) a -t7z -mx=9 "$(PKGNAME).7z" "$(PKGNAME)" >NUL && rmdir /S /Q "$(PKGNAME)"

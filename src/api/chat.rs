@@ -377,6 +377,7 @@ async fn ask(
     mode: &str,
     cfg: &Config,
 ) -> Result<StreamEnd, String> {
+    let timeout = Duration::from_secs(cfg.TimeoutSecs.max(1));
     // reset: "auto" 表示沿用网页端会话历史（只发最后一条消息）；
     // 超过 maxTurnsPerChat 时 driver 会自己摘要并开新会话。
     let mut params = json!({
@@ -386,7 +387,7 @@ async fn ask(
         "headless": cfg.Headless,
         "reset": "auto",
         "maxTurnsPerChat": 50,
-        "timeoutMs": cfg.Timeout().as_millis() as u64
+        "timeoutMs": timeout.as_millis() as u64
     });
     if !tools_text.is_empty() {
         params["toolsText"] = json!(tools_text);
@@ -401,7 +402,7 @@ async fn ask(
     debug!(
         mode,
         headless = cfg.Headless,
-        timeout_ms = cfg.Timeout().as_millis() as u64,
+        timeout_ms = timeout.as_millis() as u64,
         "sending driver streamAsk"
     );
     let started = driver
@@ -415,7 +416,7 @@ async fn ask(
     debug!(stream_id = %stream_id, "driver stream registered");
     // 等 stream-end 事件；比 driver 内部 timeout 多留 60s，让内层先超时、错误更具体
     let end = driver
-        .wait_stream(&stream_id, cfg.Timeout() + Duration::from_secs(60))
+        .wait_stream(&stream_id, timeout + Duration::from_secs(60))
         .await?;
     if !end.ok {
         let err = end

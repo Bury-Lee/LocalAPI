@@ -61,13 +61,39 @@ const CALIBRATION: &str = r#"{
   ]
 }"#;
 
+/// 启动驱动时下发的运行时参数（不经过环境变量）。
+#[derive(Clone, Debug, Default)]
+pub struct DriverOptions {
+    /// 浏览器可执行文件（绝对路径），空则驱动自动探测
+    pub chrome_path: Option<String>,
+    /// 浏览器代理，空则不用
+    pub proxy: String,
+}
+
+/// 相对路径一律按程序根目录展开，避免 Node/浏览器子进程解析不一致。
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::app_root::Root().join(path)
+    }
+}
+
+fn is_deepseek(driver_path: &Path) -> bool {
+    driver_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("deepseek"))
+        .unwrap_or(false)
+}
+
 pub struct Driver {
     // 保留句柄：tokio 的 Child 默认不会 kill_on_drop，丢了就成孤儿进程；
     // 同时这也是超时/退出时 kill 的入口。
     child: Mutex<Child>,
     // 多个请求可能同时写同一个管道，必须串行化；因为跨 .await 持锁，只能用 tokio 的异步 Mutex
     stdin: AsyncMutex<ChildStdin>,
-    // 请求 id 用原子量，省掉一把锁
+    // 请求 id 用原子量
     seq: AtomicU64,
     // std::sync::Mutex 足够：临界区里没有 .await，比 tokio::Mutex 便宜
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
@@ -86,19 +112,24 @@ impl Driver {
     pub async fn start(
         driver_path: &Path,
         base: &Path,
-        envs: &[(String, String)],
+        options: &DriverOptions,
     ) -> Result<Arc<Driver>, String> {
-        // driver 把浏览器 profile、校准数据都放在 base 目录；首次启动补一份默认校准
-        std::fs::create_dir_all(base).map_err(|e| format!("mkdir base: {e}"))?;
-        let calib = base.join("calibration.json");
-        if !calib.exists() {
-            let _ = std::fs::write(&calib, CALIBRATION);
+        // 配置里的相对路径按程序根目录补全：浏览器/Node 子进程对相对路径的解析
+        // 不一定跟网关一致（尤其 `--user-data-dir`），必须传绝对路径。
+        let driver_path = absolute_path(driver_path);
+        let base = absolute_path(base);
+        // 只有 deepseek 需要校准数据；其它驱动的 calibration.json 没有消费方
+        if is_deepseek(&driver_path) {
+            std::fs::create_dir_all(&base).map_err(|e| format!("mkdir base: {e}"))?;
+            let calib = base.join("calibration.json");
+            if !calib.exists() {
+                let _ = std::fs::write(&calib, CALIBRATION);
+            }
         }
         // 三段管道：stdin 发请求，stdout 收应答/事件，stderr 转发日志
         let mut cmd = Command::new("node");
-        cmd.arg(driver_path)
-            .envs(envs.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .env("DS_WEB_BASE", base)
+        cmd.arg(&driver_path)
+            .current_dir(crate::app_root::Root())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -133,7 +164,22 @@ impl Driver {
         tokio::spawn(read_stderr(driver.clone(), stderr));
         // 启动失败时主动收回node 进程
         match driver.wait_ready(Duration::from_secs(25)).await {
-            Ok(()) => Ok(driver),
+            Ok(()) => {
+                // 浏览器路径/代理通过 RPC 下发
+                let config = json!({
+                    "config": {
+                        "chromePath": options.chrome_path.clone().unwrap_or_default(),
+                        "proxy": options.proxy.clone(),
+                    }
+                });
+                if let Err(err) = driver
+                    .rpc("config", config, Duration::from_secs(5))
+                    .await
+                {
+                    warn!(error = %err, "driver config rpc failed");
+                }
+                Ok(driver)
+            }
             Err(e) => {
                 if let Ok(mut c) = driver.child.lock() {
                     let _ = c.start_kill();
@@ -339,20 +385,20 @@ pub struct DriverManager {
     inner: AsyncMutex<Option<Arc<Driver>>>,
     driver_path: PathBuf,
     base: PathBuf,
-    envs: Vec<(String, String)>,
+    options: DriverOptions,
 }
 
 impl DriverManager {
     pub fn new(
         driver_path: PathBuf,
         base: PathBuf,
-        envs: Vec<(String, String)>,
+        options: DriverOptions,
     ) -> Arc<DriverManager> {
         Arc::new(DriverManager {
             inner: AsyncMutex::new(None),
             driver_path,
             base,
-            envs,
+            options,
         })
     }
 
@@ -364,7 +410,8 @@ impl DriverManager {
                 return Ok(driver.clone());
             }
         }
-        let driver = Driver::start(&self.driver_path, &self.base, &self.envs).await?;
+        let driver =
+            Driver::start(&self.driver_path, &self.base, &self.options).await?;
         *guard = Some(driver.clone());
         Ok(driver)
     }

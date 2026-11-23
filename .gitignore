@@ -1,2 +1,7 @@
 /target
 dist/
+/data/
+/.data/
+/logs/
+/history/
+/config.json

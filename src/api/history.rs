@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 
 use crate::api::pages::escape_html;
@@ -51,10 +51,7 @@ p.back{{margin-top:20px}}
 }
 
 /// `GET /history/{id}`：导出指定会话为 Markdown（浏览器直接查看）。
-pub async fn OutportSession(
-    State(st): State<Arc<AppState>>,
-    Path(id): Path<u64>,
-) -> Response {
+pub async fn OutportSession(State(st): State<Arc<AppState>>, Path(id): Path<u64>) -> Response {
     let history = st.history.lock().await;
     match history.OutportMarkdown(id) {
         Some(markdown) => {
@@ -70,10 +67,7 @@ pub async fn OutportSession(
 }
 
 /// `GET /history/{id}/download`：以附件形式下载指定会话的 JSON 文件。
-pub async fn DownloadSession(
-    State(st): State<Arc<AppState>>,
-    Path(id): Path<u64>,
-) -> Response {
+pub async fn DownloadSession(State(st): State<Arc<AppState>>, Path(id): Path<u64>) -> Response {
     let history = st.history.lock().await;
     let body = match history.OutportJson(id) {
         Some(text) => text,
@@ -84,9 +78,8 @@ pub async fn DownloadSession(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    if let Ok(value) = HeaderValue::from_str(&format!(
-        "attachment; filename=\"session-{id}.json\""
-    )) {
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"session-{id}.json\""))
+    {
         response
             .headers_mut()
             .insert(header::CONTENT_DISPOSITION, value);

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::response::Html;
 
+use crate::app_root;
 use crate::app_status::AppState;
 
 /// 控制台/引导页里展示的厂商列表（与 cjs/<site>-driver.cjs 对应）。
@@ -62,8 +63,8 @@ pub async fn control(State(st): State<Arc<AppState>>) -> Html<String> {
     let cfg = st.cfg;
     let site = escape_html(&cfg.SiteName());
     let host = escape_html(&cfg.Host);
-    let driver = escape_html(&cfg.Driver);
-    let base = escape_html(&cfg.Base);
+    let driver = escape_html(&app_root::DriverPath(&cfg.SiteName()).display().to_string());
+    let base = escape_html(&app_root::DataDir().display().to_string());
     let headless = if cfg.Headless { "无头" } else { "有头" };
     // 不同厂商的登录入口：/login 支持 site/profile/wait 参数
     let mut vendors = String::new();
@@ -99,7 +100,7 @@ a{{color:#0b57d0;text-decoration:none}}a:hover{{text-decoration:underline}}
     ))
 }
 
-/// 页面里只放配置值/历史内容，做最小转义避免破坏标签。
+/// 页面里只放配置值/历史内容
 pub(crate) fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

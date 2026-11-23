@@ -1,12 +1,15 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const VERSION = '0.2.0';
-const BASE = process.env.DS_WEB_BASE || path.join(os.homedir(), '.dsweb');
+// 数据目录固定为“程序根目录/data”（driver-core 位于 <root>/cjs/lib）
+const BASE = path.join(__dirname, '..', '..', 'data');
+// 由网关通过 config RPC 下发；不读取任何环境变量
+let chromeOverride = '';
+let proxyOverride = '';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -165,8 +168,7 @@ class Cdp {
 }
 
 function findChrome() {
-  const env = process.env.DS_WEB_CHROME || process.env.DSWEB_CHROME || '';
-  if (env && fs.existsSync(env)) return env;
+  if (chromeOverride && fs.existsSync(chromeOverride)) return chromeOverride;
   const candidates = [
     'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -179,7 +181,7 @@ function findChrome() {
   }
   candidates.push('/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
   for (const p of candidates) { if (p && fs.existsSync(p)) return p; }
-  throw new Error('Chrome/Edge not found; set DS_WEB_CHROME');
+  throw new Error('Chrome/Edge not found; set ChromePath in config.json');
 }
 
 function createRuntime(site) {
@@ -199,25 +201,7 @@ function createRuntime(site) {
   }
   function emit(name, payload) { send({ event: name, ...(payload || {}) }); }
 
-  async function attach(profile) {
-    const base = process.env.DS_WEB_CDP.replace(/\/+$/, '');
-    const version = await getJson(base + '/json/version');
-    const pages = await getJson(base + '/json/list');
-    const page = pages.find((t) => t.type === 'page' && String(t.url || '').includes(site.hostMatch))
-      || pages.find((t) => t.type === 'page');
-    if (!page) throw new Error('no attachable page at ' + base);
-    const ws = await wsConnect(version.webSocketDebuggerUrl);
-    const cdp = new Cdp(ws);
-    const attached = await cdp.call('Target.attachToTarget', { targetId: page.id, flatten: true });
-    const sessionId = attached.sessionId;
-    await cdp.call('Page.enable', {}, sessionId);
-    await cdp.call('Runtime.enable', {}, sessionId);
-    browser = { child: null, cdp, sessionId, profile, headless: false, attached: true };
-    log('attached to', page.url);
-  }
-
   async function launch(profile, headless) {
-    if (process.env.DS_WEB_CDP) return attach(profile);
     const dir = path.join(BASE, 'profiles', site.id + '-' + String(profile || 'default'));
     fs.mkdirSync(dir, { recursive: true });
     for (const f of ['DevToolsActivePort', 'SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
@@ -236,7 +220,7 @@ function createRuntime(site) {
       '--window-size=1280,900',
       'about:blank',
     ];
-    if (process.env.DS_WEB_PROXY) args.unshift('--proxy-server=' + process.env.DS_WEB_PROXY);
+    if (proxyOverride) args.unshift('--proxy-server=' + proxyOverride);
     if (headless) args.unshift('--headless=new');
     log('launching', exe, 'headless=' + !!headless, 'profile=' + profile);
     const child = spawn(exe, args, { stdio: 'ignore' });
@@ -436,6 +420,14 @@ function createRuntime(site) {
   handlers.ping = async () => ({ ok: true, version: VERSION, site: site.id });
   handlers.health = async () => ({ ok: true });
   handlers.models = async () => ({ site: site.id, models: site.models || [] });
+
+  // 网关启动后通过 RPC 下发浏览器路径/代理；不读取环境变量
+  handlers.config = async (params) => {
+    const cfg = (params && params.config) || params || {};
+    if (cfg.chromePath !== undefined) chromeOverride = String(cfg.chromePath || '');
+    if (cfg.proxy !== undefined) proxyOverride = String(cfg.proxy || '');
+    return { ok: true, chromePath: chromeOverride, proxy: proxyOverride, baseDir: BASE };
+  };
 
   handlers.status = async () => {
     if (!browser) return { browser: { running: false }, site: site.id };

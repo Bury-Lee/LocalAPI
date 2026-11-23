@@ -43,7 +43,7 @@ function logErr(...a) { console.error('[dsweb][err]', ...a); }
 /* ------------------------------------------------------------------ */
 /* config                                                              */
 /* ------------------------------------------------------------------ */
-// 默认配置；DS_WEB_BASE 决定 profile/校准/日志落在哪个目录（默认 ~/.dsweb）
+// 默认配置；数据目录固定为 <程序根目录>/data，由网关通过 config RPC 覆盖运行参数
 // 这里的值可以用 RPC 方法 config 覆盖（DSH 插件就是这么做的）
 const DEFAULTS = {
   headless: true,
@@ -58,15 +58,17 @@ const DEFAULTS = {
   maxMigrations: 24,
   maxQuotaBackoffRetries: 3,
   profiles: [{ name: 'default', headless: true }],
-  chromePath: process.env.DS_WEB_CHROME || '',
-  baseDir: process.env.DS_WEB_BASE || path.join(os.homedir(), '.dsweb'),
+  chromePath: '',
+  // 数据目录固定为“程序根目录/data”（本文件位于 <root>/cjs）
+  baseDir: path.join(__dirname, '..', 'data'),
+  proxy: '',
 };
 // 深拷贝一份，避免请求里修改 config 时污染 DEFAULTS
 let CFG = JSON.parse(JSON.stringify(DEFAULTS));
 
 // 每个 profile 一个独立的浏览器 user-data-dir：Cookie、登录态、缓存都在里面。
 // 所以“同一个 profile” = 同一个浏览器身份；想换账号就换 profile 名。
-function profileDir(name) { return path.join(CFG.baseDir, 'profiles', String(name || 'default')); }
+function profileDir(name) { return path.join(CFG.baseDir, 'profiles', 'deepseek-' + String(name || 'default')); }
 function effectiveHeadless(profile) { return profile && profile.headless !== undefined ? profile.headless : CFG.headless; }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -288,7 +290,7 @@ class CdpClient {
 /* ------------------------------------------------------------------ */
 /* Chrome discovery & browser lifecycle                                */
 /* ------------------------------------------------------------------ */
-// 找本机 Chrome/Edge 的可执行文件；DS_WEB_CHROME 可强制指定
+// 找本机 Chrome/Edge 的可执行文件；config.json 的 ChromePath 可强制指定
 function findChrome() {
   if (CFG.chromePath) return CFG.chromePath;
   const candidates = [];
@@ -347,7 +349,7 @@ async function launchBrowser(profile) {
   const launch = (async () => {
     await closeBrowser();
     const chrome = findChrome();
-    if (!chrome) throw new Error('Chrome/Edge not found. Set DS_WEB_CHROME or install Chrome/Edge.');
+    if (!chrome) throw new Error('Chrome/Edge not found; set ChromePath in config.json or install Chrome/Edge.');
     const dir = profileDir(profile.name);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
     const headless = effectiveHeadless(profile);
@@ -375,6 +377,7 @@ async function launchBrowser(profile) {
         '--window-size=1280,900',
         'about:blank',
       ];
+      if (CFG.proxy) args.unshift('--proxy-server=' + CFG.proxy);
       if (headless) args.splice(1, 0, '--headless=new');
       log('launching', chrome, 'headless=' + headless, 'profile=' + profile.name, 'attempt=' + attempt);
       const proc = spawn(args[0], args.slice(1), { stdio: 'ignore' });
@@ -1739,7 +1742,7 @@ async function openWindowSafe(url) {
   const launch = (async () => {
     await closeDashWindow();
     const chrome = findChrome();
-    if (!chrome) throw new Error('Chrome/Edge not found. Set DS_WEB_CHROME or install Chrome/Edge.');
+    if (!chrome) throw new Error('Chrome/Edge not found; set ChromePath in config.json or install Chrome/Edge.');
     const dir = path.join(CFG.baseDir, 'profiles', 'dashboard');
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
     for (const f of ['DevToolsActivePort', 'SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
@@ -1763,6 +1766,7 @@ async function openWindowSafe(url) {
       '--window-size=1200,900',
       String(url),
     ];
+    if (CFG.proxy) args.unshift('--proxy-server=' + CFG.proxy);
     log('launching standalone window', String(url));
     const proc = spawn(args[0], args.slice(1), { stdio: 'ignore' });
     dwindow.proc = proc;
@@ -1814,6 +1818,7 @@ handlers.config = async (params) => {
     if (c.maxMigrations !== undefined) CFG.maxMigrations = parseInt(c.maxMigrations, 10) || 24;
     if (c.maxQuotaBackoffRetries !== undefined) CFG.maxQuotaBackoffRetries = parseInt(c.maxQuotaBackoffRetries, 10) || 3;
     if (c.chromePath !== undefined) CFG.chromePath = String(c.chromePath || '');
+    if (c.proxy !== undefined) CFG.proxy = String(c.proxy || '');
     if (Array.isArray(c.profiles) && c.profiles.length) {
       CFG.profiles = c.profiles.map((p, i) => ({ name: String(p.name || 'profile' + (i + 1)), headless: p.headless !== undefined ? !!p.headless : CFG.headless }));
     }
@@ -1937,14 +1942,14 @@ handlers.stop = async (params) => {
 handlers.login = async (params) => {
   const profileName = (params && params.profile) || 'default';
   const timeoutMs = (params && params.timeoutMs) || 300000;
-  /* /login ���뵯�ɼ����ڣ���������������ͷģʽ������������ҳ�����ڱ�� profile��
-   * �ȹص����ؿ������� ensurePage �Ḵ�ó�פ�� thePage����Զ��������¼���ڡ� */
+  /* /login 需要弹出可见窗口：如果当前浏览器是无头模式、或 profile 名不一致，
+   * 先关掉旧窗口，让 ensurePage 重新创建常驻的 thePage，避免复用旧的登录窗口。 */
   if (browser.proc && (!browser.profile || effectiveHeadless(browser.profile) || browser.profile.name !== profileName)) {
     try { await closeBrowser(); } catch (e) { /* ignore */ }
     thePage = null;
   }
-  /* ��ҳ��פ����¼�뷢��Ϣ��ͬһҳ�棨���� deepseek-browser-agent �� _ensureLoggedIn��
-   * ��ҳ�� �� ���δ��¼ �� �û���ͬһ�����ֶ���¼ �� �Զ���ѯֱ����¼�ɹ����� */
+  /* 让页面常驻：登录与发消息共用同一页面（复用 deepseek-browser-agent 的 _ensureLoggedIn），
+   * 页面尚未登录时，由用户在同一浏览器里手动登录，这里自动轮询直到登录成功为止。 */
   const pageId = await ensurePage({ name: profileName, headless: false });
   try { await navigate(pageId, DS_URL); } catch (e) { log('login navigate failed', e.message); }
   const start = Date.now();

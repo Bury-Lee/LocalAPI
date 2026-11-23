@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 
 use crate::api::router::BuildRouter;
+use crate::app_root;
 use crate::app_status::AppState;
-use crate::config::config::{self, Config, DefaultConfigPath};
+use crate::config::config::{self, Config};
 
 /// 无子命令时默认按 `run` 处理，保持旧版直接双击启动的行为。
 #[derive(Debug, Parser)]
@@ -42,25 +43,17 @@ enum Command {
     #[command(alias = "serve")]
     Run,
 
-    /// 生成默认 config.json（已存在时需 --force）
+    /// 在程序根目录生成默认 config.json（已存在时需 --force）
     #[command(alias = "Init")]
     Init(InitArgs),
 
-    /// 清空运行数据/缓存（浏览器 profile、Cookie、校准数据）
+    /// 清空运行数据/缓存（浏览器 profile、Cookie、历史、校准数据）
     #[command(alias = "Clean")]
     Clean(CleanArgs),
 }
 
 #[derive(Debug, Args)]
 struct InitArgs {
-    /// 写入指定路径；相对路径按当前目录解析
-    #[arg(long, value_name = "FILE")]
-    path: Option<PathBuf>,
-
-    /// 写入用户级配置（%APPDATA%\dsh-web-gateway\config.json）
-    #[arg(long)]
-    global: bool,
-
     /// 覆盖已存在的配置文件
     #[arg(long)]
     force: bool,
@@ -100,14 +93,15 @@ fn fail(err: &str) -> ! {
     std::process::exit(1);
 }
 
-/// `run`：原有的启动流程。
+/// `run`：启动网关。配置/数据/日志全部固定在 exe 所在目录。
 async fn runGateway() {
-    let configPath = std::env::current_dir()
-        .map(|dir| dir.join(DefaultConfigPath))
-        .unwrap_or_else(|_| PathBuf::from(DefaultConfigPath));
+    let configPath = app_root::ConfigPath();
+
     let (cfg, firstRun) = if configPath.is_file() {
         match Config::ReadFromJson(&configPath.to_string_lossy()) {
-            Ok(cfg) => (cfg, false),
+            Ok(cfg) => {
+                (cfg, false)
+            }
             Err(err) => fail(&err),
         }
     } else {
@@ -132,7 +126,7 @@ async fn runGateway() {
 
     tracing::info!(
         config = %configPath.display(),
-        cwd = %configPath.parent().unwrap_or(Path::new(".")).display(),
+        root = %app_root::Root().display(),
         "config loaded"
     );
 
@@ -170,8 +164,8 @@ async fn runGateway() {
     tracing::info!(
         %addr,
         site = %cfg.SiteName(),
-        driver = %cfg.DriverPath().display(),
-        base = %cfg.BasePath().display(),
+        driver = %app_root::DriverPath(&cfg.SiteName()).display(),
+        base = %app_root::DataDir().display(),
         headless = cfg.Headless,
         timeout_secs = cfg.TimeoutSecs,
         max_concurrent = cfg.MaxConcurrent,
@@ -190,10 +184,10 @@ async fn runGateway() {
     shutdownState.manager.shutdown().await;
 }
 
-/// `init`：写一份默认配置。
+/// `init`：在程序根目录写一份默认配置。
 fn initCmd(args: InitArgs) -> Result<(), String> {
-    let path = initTarget(&args)?;
-    // 配置里可能有用户手调的代理/路径，默认不覆盖，--force 才视为明确同意
+    let path = app_root::ConfigPath();
+    // 配置里有用户手调的代理/浏览器路径，默认不覆盖，--force 才视为明确同意
     if path.exists() && !args.force {
         return Err(format!("{} 已存在；如需覆盖请加 --force", path.display()));
     }
@@ -217,54 +211,18 @@ fn saveConfig(path: &Path, cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// 初始化指定路径。
-fn initTarget(args: &InitArgs) -> Result<PathBuf, String> {
-    if let Some(path) = &args.path {
-        // 显式路径跟随当前目录
-        return if path.is_absolute() {
-            Ok(path.to_path_buf())
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .map_err(|e| format!("获取当前目录失败: {e}"))
-        };
-    }
-    if args.global {
-        // 全局配置：%APPDATA%\<AppDirName>\config.json，取不到则退回当前目录
-        let base = std::env::var("APPDATA")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        return Ok(base.join(config::AppDirName).join(DefaultConfigPath));
-    }
-    Ok(std::env::current_dir()
-        .map_err(|e| format!("获取当前目录失败: {e}"))?
-        .join(DefaultConfigPath))
-}
-
-/// `clean`：删除运行时数据目录；`--logs` 时连日志目录一起删。
+/// `clean`：删除 `<root>/data`；`--logs` 时连 `<root>/logs` 一起删。
 fn cleanCmd(args: CleanArgs) -> Result<(), String> {
-    // 清理必须对准运行时真正使用的目录：配置只从当前目录的 config.json 读取
-    let configPath = std::env::current_dir()
-        .map(|dir| dir.join(DefaultConfigPath))
-        .unwrap_or_else(|_| PathBuf::from(DefaultConfigPath));
-    let cfg = if configPath.is_file() {
-        Config::ReadFromJson(&configPath.to_string_lossy())?
-    } else {
-        Config::default()
-    };
-    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root = app_root::Root().to_path_buf();
 
-    // Base 里是 profile/Cookie/校准；日志默认保留，排查问题时还有据可查
-    let mut targets = vec![cfg.BasePath()];
+    // data 里是 profile/Cookie/历史/校准；日志默认保留，排查问题时还有据可查
+    let mut targets = vec![app_root::DataDir()];
     if args.logs {
-        targets.push(PathBuf::from(&cfg.LogDir));
+        targets.push(app_root::LogDir());
     }
 
     for target in targets {
-        checkCleanTarget(&target, &project)?;
+        checkCleanTarget(&target, &root)?;
         if !target.exists() {
             println!("跳过（不存在）: {}", target.display());
             continue;
@@ -283,33 +241,31 @@ fn cleanCmd(args: CleanArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// 防呆：不清理项目根目录，也不清理“包含项目”的上级目录。
-fn checkCleanTarget(target: &Path, project: &Path) -> Result<(), String> {
+/// 防呆：只允许清理程序根目录之下、且不等于根目录本身的位置。
+fn checkCleanTarget(target: &Path, root: &Path) -> Result<(), String> {
     // 目标可能尚未创建：取不到真实位置时退回绝对路径，防呆仍能生效
     let abs = |p: &Path| -> PathBuf {
         std::fs::canonicalize(p).unwrap_or_else(|_| {
             if p.is_absolute() {
                 p.to_path_buf()
             } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(p))
-                    .unwrap_or_else(|_| p.to_path_buf())
+                root.join(p)
             }
         })
     };
 
     // 按真实落盘位置比较：".."、符号链接或大小写差异都不能绕过防呆
     let targetAbs = abs(target);
-    let projectAbs = abs(project);
+    let rootAbs = abs(root);
 
-    if targetAbs == projectAbs {
-        return Err(format!("拒绝清理项目根目录: {}", targetAbs.display()));
+    if targetAbs == rootAbs {
+        return Err(format!("拒绝清理程序根目录: {}", targetAbs.display()));
     }
-    if projectAbs.starts_with(&targetAbs) {
+    if !targetAbs.starts_with(&rootAbs) {
         return Err(format!(
-            "拒绝清理包含项目的目录: {}\n项目位于 {}",
+            "程序根目录之外的路径: {}（根目录 {}）",
             targetAbs.display(),
-            projectAbs.display()
+            rootAbs.display()
         ));
     }
     if targetAbs.parent().is_none() {
